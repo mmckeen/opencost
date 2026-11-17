@@ -72,6 +72,30 @@ func TestParseGCPInstanceTypeLabel(t *testing.T) {
 			input:    "c4-highmem-32-lssd",
 			expected: "c4standard",
 		},
+		{
+			input:    "custom-4-16384",
+			expected: "custom",
+		},
+		{
+			input:    "n2-custom-4-8192",
+			expected: "n2custom",
+		},
+		{
+			input:    "n2d-custom-4-8192",
+			expected: "n2dcustom",
+		},
+		{
+			input:    "e2-custom-4-8192",
+			expected: "e2custom",
+		},
+		{
+			input:    "g2-custom-4-16384",
+			expected: "g2custom",
+		},
+		{
+			input:    "n2-custom-4-8192-ext",
+			expected: "n2custom",
+		},
 	}
 
 	for _, test := range cases {
@@ -311,6 +335,97 @@ func TestParsePage(t *testing.T) {
 					Node: &models.Node{
 						VCPUCost:  "0.037970000000000004",
 						RAMCost:   "0.005089000000000001",
+						UsageType: "ondemand",
+					},
+				},
+			},
+			expectedToken: "done",
+			expectError:   false,
+		},
+		"Custom SKUs": {
+			// Real catalog SKUs; every custom family used to share one key.
+			inputFile: "./test/custom_skus.json",
+			inputKeys: map[string]models.Key{
+				"us-central1,custom,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "custom-4-16384",
+						"topology.kubernetes.io/region":    "us-central1",
+					},
+				},
+				"us-central1,n2custom,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "n2-custom-4-8192",
+						"topology.kubernetes.io/region":    "us-central1",
+					},
+				},
+				"us-central1,e2custom,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "e2-custom-4-8192",
+						"topology.kubernetes.io/region":    "us-central1",
+					},
+				},
+				"us-central1,e2standard,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "e2-standard-4",
+						"topology.kubernetes.io/region":    "us-central1",
+					},
+				},
+			},
+			pvKeys: map[string]models.PVKey{},
+			expectedPrices: map[string]*GCPPricing{
+				"us-central1,custom,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.004446",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,custom,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.004446",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,n2custom,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.00444885",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,n2custom,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.00444885",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,e2custom,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.022902170000000003",
+						RAMCost:   "0.003069707",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,e2custom,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.022902170000000003",
+						RAMCost:   "0.003069707",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,e2standard,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.021811590000000002",
+						RAMCost:   "0.00292353",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,e2standard,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.021811590000000002",
+						RAMCost:   "0.00292353",
 						UsageType: "ondemand",
 					},
 				},

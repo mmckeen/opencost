@@ -611,6 +611,29 @@ func isVariantSKU(description string) bool {
 	return false
 }
 
+// Custom SKUs without a family are N1, whose instance type label parses to "custom".
+func customMachineFamily(description string) string {
+	desc := strings.ToUpper(description)
+	switch {
+	case strings.Contains(desc, "N2D AMD CUSTOM"):
+		return "n2dcustom"
+	case strings.Contains(desc, "N2 CUSTOM"):
+		return "n2custom"
+	case strings.Contains(desc, "N4A CUSTOM"):
+		return "n4acustom"
+	case strings.Contains(desc, "N4D CUSTOM"):
+		return "n4dcustom"
+	case strings.Contains(desc, "N4 CUSTOM"):
+		return "n4custom"
+	case strings.Contains(desc, "E2 CUSTOM"):
+		return "e2custom"
+	case strings.Contains(desc, "G2 CUSTOM"):
+		return "g2custom"
+	default:
+		return "custom"
+	}
+}
+
 func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys map[string]models.PVKey) (map[string]*GCPPricing, string, error) {
 	gcpPricingList := make(map[string]*GCPPricing)
 	var nextPageToken string
@@ -742,7 +765,7 @@ func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys m
 				}
 
 				if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "CUSTOM") {
-					instanceType = "custom"
+					instanceType = customMachineFamily(product.Description)
 				}
 
 				if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "N2") {
@@ -801,7 +824,6 @@ func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys m
 						candidateKeys = append(candidateKeys, region+","+"e2small"+","+usageType)
 						candidateKeys = append(candidateKeys, region+","+"e2medium"+","+usageType)
 						candidateKeys = append(candidateKeys, region+","+"e2standard"+","+usageType)
-						candidateKeys = append(candidateKeys, region+","+"e2custom"+","+usageType)
 					case "a2":
 						candidateKeys = append(candidateKeys, region+","+"a2highgpu"+","+usageType)
 						candidateKeys = append(candidateKeys, region+","+"a2megagpu"+","+usageType)
@@ -892,7 +914,7 @@ func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys m
 							if hourlyPrice == 0 {
 								continue
 							} else if strings.Contains(strings.ToUpper(product.Description), "RAM") {
-								if instanceType == "custom" {
+								if strings.HasSuffix(instanceType, "custom") {
 									log.Debugf("GCP Billing API: RAM custom sku '%s'", product.Name)
 								}
 								if _, ok := gcpPricingList[candidateKey]; ok {
