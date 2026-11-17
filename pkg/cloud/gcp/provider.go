@@ -599,7 +599,7 @@ type GCPResourceInfo struct {
 
 // Variant SKUs share their base SKU's pricing key, so whichever came last in the
 // catalog would set the price.
-var variantSKUWords = []string{"PREMIUM", "SOLE TENANCY", "RESERVED", "DWS", "EXTENDED"}
+var variantSKUWords = []string{"PREMIUM", "SOLE TENANCY", "RESERVED", "DWS"}
 
 func isVariantSKU(description string) bool {
 	desc := strings.ToUpper(description)
@@ -631,6 +631,36 @@ func customMachineFamily(description string) string {
 		return "g2custom"
 	default:
 		return "custom"
+	}
+}
+
+// Extended memory is priced on its own key so it never replaces the base RAM price.
+func addExtendedRAMPricing(pricing map[string]*GCPPricing, product *GCPPricing, inputKeys map[string]models.Key, usageType string) {
+	if len(product.PricingInfo) == 0 || len(product.PricingInfo[0].PricingExpression.TieredRates) == 0 {
+		return
+	}
+	tiers := product.PricingInfo[0].PricingExpression.TieredRates
+	price := tiers[len(tiers)-1].UnitPrice
+	units, err := strconv.Atoi(price.Units)
+	if err != nil {
+		return
+	}
+	hourlyPrice := price.Nanos*math.Pow10(-9) + float64(units)
+
+	family := customMachineFamily(product.Description)
+	for _, region := range product.ServiceRegions {
+		key := region + "," + family + "," + usageType
+		_, ok := inputKeys[key]
+		_, okGPU := inputKeys[key+",gpu"]
+		if !ok && !okGPU {
+			continue
+		}
+		pricing[key+",extended"] = &GCPPricing{
+			Node: &models.Node{
+				RAMCost:   strconv.FormatFloat(hourlyPrice, 'f', -1, 64),
+				UsageType: usageType,
+			},
+		}
 	}
 }
 
@@ -761,6 +791,13 @@ func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys m
 
 				if isVariantSKU(product.Description) {
 					log.Debugf("GCP Billing API: skipping variant SKU %s: %s", product.SKUID, product.Description)
+					continue
+				}
+
+				if strings.Contains(strings.ToUpper(product.Description), "EXTENDED") {
+					if instanceType == "ram" && strings.Contains(strings.ToUpper(product.Description), "CUSTOM") {
+						addExtendedRAMPricing(gcpPricingList, product, inputKeys, usageType)
+					}
 					continue
 				}
 
@@ -1578,12 +1615,44 @@ func (key *pvKey) Features() string {
 
 type gcpKey struct {
 	Labels map[string]string
+
+	// Set only for custom machine types with extended memory.
+	extendedFamily string
+	vCPUs          int
+	memoryMiB      int
+	capacityBytes  int64
+}
+
+// N1 custom machine types have no family prefix.
+var extendedCustomTypeRegex = regexp.MustCompile(`^(?:(n2|n2d|n4|n4a|n4d)-)?custom-(\d+)-(\d+)-ext$`)
+
+// GiB per vCPU billed at the custom memory rate before extended memory applies.
+var customMemoryGiBPerVCPU = map[string]float64{
+	"n1":  6.5,
+	"n2":  8,
+	"n2d": 8,
+	"n4":  8,
+	"n4a": 8,
+	"n4d": 8,
 }
 
 func (gcp *GCP) GetKey(labels map[string]string, n *clustercache.Node) models.Key {
-	return &gcpKey{
+	key := &gcpKey{
 		Labels: labels,
 	}
+	it, _ := util.GetInstanceType(labels)
+	if m := extendedCustomTypeRegex.FindStringSubmatch(strings.ToLower(it)); m != nil {
+		key.extendedFamily = m[1]
+		if key.extendedFamily == "" {
+			key.extendedFamily = "n1"
+		}
+		key.vCPUs, _ = strconv.Atoi(m[2])
+		key.memoryMiB, _ = strconv.Atoi(m[3])
+		if n != nil {
+			key.capacityBytes = n.Status.Capacity.Memory().Value()
+		}
+	}
+	return key
 }
 
 func (gcp *gcpKey) ID() string {
@@ -1693,6 +1762,46 @@ func (gcp *GCP) isValidPricingKey(key models.Key) bool {
 	return ok
 }
 
+// withExtendedMemory blends the RAM rate of a custom machine type with extended
+// memory. The rate is spread over the node's capacity so the node's RAM total is exact.
+func (gcp *GCP) withExtendedMemory(key models.Key, node *models.Node) *models.Node {
+	gk, ok := key.(*gcpKey)
+	if !ok || gk.extendedFamily == "" {
+		return node
+	}
+	memoryGiB := float64(gk.memoryMiB) / 1024
+	standardGiB := math.Min(memoryGiB, float64(gk.vCPUs)*customMemoryGiBPerVCPU[gk.extendedFamily])
+	extendedGiB := memoryGiB - standardGiB
+	if extendedGiB <= 0 {
+		return node
+	}
+
+	extendedKey := strings.TrimSuffix(key.Features(), ",gpu") + ",extended"
+	gcp.DownloadPricingDataLock.RLock()
+	extended, ok := gcp.Pricing[extendedKey]
+	gcp.DownloadPricingDataLock.RUnlock()
+	if !ok || extended.Node == nil {
+		log.DedupedWarningf(5, "GCP: no extended memory price for %s, so its %.1f GiB of extended memory is priced at the base RAM rate", key.Features(), extendedGiB)
+		return node
+	}
+	baseRate, err := strconv.ParseFloat(node.RAMCost, 64)
+	if err != nil {
+		return node
+	}
+	extendedRate, err := strconv.ParseFloat(extended.Node.RAMCost, 64)
+	if err != nil {
+		return node
+	}
+
+	capacityGiB := memoryGiB
+	if gk.capacityBytes > 0 {
+		capacityGiB = float64(gk.capacityBytes) / (1024 * 1024 * 1024)
+	}
+	blended := *node
+	blended.RAMCost = strconv.FormatFloat((standardGiB*baseRate+extendedGiB*extendedRate)/capacityGiB, 'f', -1, 64)
+	return &blended
+}
+
 // NodePricing returns GCP pricing data for a single node
 func (gcp *GCP) NodePricing(key models.Key) (*models.Node, models.PricingMetadata, error) {
 	meta := models.PricingMetadata{}
@@ -1712,7 +1821,7 @@ func (gcp *GCP) NodePricing(key models.Key) (*models.Node, models.PricingMetadat
 
 		n.Node.BaseCPUPrice = gcp.BaseCPUPrice
 
-		return n.Node, meta, nil
+		return gcp.withExtendedMemory(key, n.Node), meta, nil
 	} else if ok := gcp.isValidPricingKey(key); ok {
 		meta.Warnings = append(meta.Warnings, fmt.Sprintf("No pricing found, but key is valid: %s", key.Features()))
 
@@ -1732,7 +1841,7 @@ func (gcp *GCP) NodePricing(key models.Key) (*models.Node, models.PricingMetadat
 
 			n.Node.BaseCPUPrice = gcp.BaseCPUPrice
 
-			return n.Node, meta, nil
+			return gcp.withExtendedMemory(key, n.Node), meta, nil
 		}
 
 		log.Warnf("no pricing data found for %s", key.Features())

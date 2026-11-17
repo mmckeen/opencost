@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,8 +20,10 @@ import (
 	"github.com/opencost/opencost/pkg/cloud/models"
 	"github.com/opencost/opencost/pkg/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/api/compute/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestParseGCPInstanceTypeLabel(t *testing.T) {
@@ -338,12 +341,19 @@ func TestParsePage(t *testing.T) {
 						UsageType: "ondemand",
 					},
 				},
+				"us-central1,custom,ondemand,extended": {
+					Node: &models.Node{
+						RAMCost:   "0.009550000000000001",
+						UsageType: "ondemand",
+					},
+				},
 			},
 			expectedToken: "done",
 			expectError:   false,
 		},
 		"Custom SKUs": {
-			// Real catalog SKUs; every custom family used to share one key.
+			// Real catalog SKUs; every custom family used to share one key, and
+			// extended memory follows the base RAM SKU it would overwrite.
 			inputFile: "./test/custom_skus.json",
 			inputKeys: map[string]models.Key{
 				"us-central1,custom,ondemand": &gcpKey{
@@ -412,6 +422,18 @@ func TestParsePage(t *testing.T) {
 					Node: &models.Node{
 						VCPUCost:  "0.022902170000000003",
 						RAMCost:   "0.003069707",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,custom,ondemand,extended": {
+					Node: &models.Node{
+						RAMCost:   "0.009550000000000001",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,n2custom,ondemand,extended": {
+					Node: &models.Node{
+						RAMCost:   "0.009550000000000001",
 						UsageType: "ondemand",
 					},
 				},
@@ -610,6 +632,53 @@ func TestParsePage(t *testing.T) {
 	}
 
 }
+func TestGCP_NodePricing_ExtendedMemory(t *testing.T) {
+	const baseRate, extendedRate = 0.004, 0.01
+	gcp := &GCP{
+		Config: &mockConfig{},
+		Pricing: map[string]*GCPPricing{
+			"us-central1,n2custom,ondemand":          {Node: &models.Node{VCPUCost: "0.03", RAMCost: "0.004"}},
+			"us-central1,n2custom,ondemand,extended": {Node: &models.Node{RAMCost: "0.01"}},
+			"us-central1,custom,ondemand":            {Node: &models.Node{VCPUCost: "0.03", RAMCost: "0.004"}},
+			"us-central1,custom,ondemand,extended":   {Node: &models.Node{RAMCost: "0.01"}},
+			"us-central1,n4custom,ondemand":          {Node: &models.Node{VCPUCost: "0.03", RAMCost: "0.004"}},
+		},
+	}
+	node := func(capacityGiB int64) *clustercache.Node {
+		return &clustercache.Node{Status: v1.NodeStatus{Capacity: v1.ResourceList{
+			v1.ResourceMemory: *resource.NewQuantity(capacityGiB<<30, resource.BinarySI),
+		}}}
+	}
+
+	tests := []struct {
+		name         string
+		instanceType string
+		capacityGiB  int64
+		want         float64
+	}{
+		{name: "N2 above 8 GiB per vCPU", instanceType: "n2-custom-4-40960-ext", capacityGiB: 40, want: (32*baseRate + 8*extendedRate) / 40},
+		{name: "N1 above 6.5 GiB per vCPU", instanceType: "custom-2-15360-ext", capacityGiB: 15, want: (13*baseRate + 2*extendedRate) / 15},
+		{name: "spread over a smaller capacity", instanceType: "n2-custom-4-40960-ext", capacityGiB: 39, want: (32*baseRate + 8*extendedRate) / 39},
+		{name: "within the limit", instanceType: "n2-custom-4-24576-ext", capacityGiB: 24, want: baseRate},
+		{name: "not extended", instanceType: "n2-custom-4-8192", capacityGiB: 8, want: baseRate},
+		{name: "no extended price", instanceType: "n4-custom-4-40960-ext", capacityGiB: 40, want: baseRate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := map[string]string{
+				"node.kubernetes.io/instance-type": tt.instanceType,
+				"topology.kubernetes.io/region":    "us-central1",
+			}
+			n, _, err := gcp.NodePricing(gcp.GetKey(labels, node(tt.capacityGiB)))
+			require.NoError(t, err)
+			got, err := strconv.ParseFloat(n.RAMCost, 64)
+			require.NoError(t, err)
+			assert.InDelta(t, tt.want, got, 1e-12)
+		})
+	}
+	assert.Equal(t, "0.004", gcp.Pricing["us-central1,n2custom,ondemand"].Node.RAMCost, "the stored base price must not change")
+}
+
 func TestGCP_GetConfig(t *testing.T) {
 	gcp := &GCP{
 		Config: &mockConfig{},
