@@ -597,6 +597,20 @@ type GCPResourceInfo struct {
 	UsageType          string `json:"usageType"`
 }
 
+// Variant SKUs share their base SKU's pricing key, so whichever came last in the
+// catalog would set the price.
+var variantSKUWords = []string{"PREMIUM", "SOLE TENANCY", "RESERVED", "DWS", "EXTENDED"}
+
+func isVariantSKU(description string) bool {
+	desc := strings.ToUpper(description)
+	for _, word := range variantSKUWords {
+		if strings.Contains(desc, word) {
+			return true
+		}
+	}
+	return false
+}
+
 func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys map[string]models.PVKey) (map[string]*GCPPricing, string, error) {
 	gcpPricingList := make(map[string]*GCPPricing)
 	var nextPageToken string
@@ -722,11 +736,16 @@ func (gcp *GCP) parsePage(r io.Reader, inputKeys map[string]models.Key, pvKeys m
 					continue
 				}
 
+				if isVariantSKU(product.Description) {
+					log.Debugf("GCP Billing API: skipping variant SKU %s: %s", product.SKUID, product.Description)
+					continue
+				}
+
 				if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "CUSTOM") {
 					instanceType = "custom"
 				}
 
-				if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "N2") && !strings.Contains(strings.ToUpper(product.Description), "PREMIUM") {
+				if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "N2") {
 					if (instanceType == "ram" || instanceType == "cpu") && strings.Contains(strings.ToUpper(product.Description), "N2D AMD") {
 						instanceType = "n2dstandard"
 					} else {

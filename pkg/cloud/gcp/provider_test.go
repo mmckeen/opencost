@@ -267,6 +267,57 @@ func TestParsePage(t *testing.T) {
 			expectedToken: "done",
 			expectError:   false,
 		},
+		"Variant SKUs": {
+			// Real catalog SKUs, each base SKU followed by a variant that shares its key.
+			inputFile: "./test/variant_skus.json",
+			inputKeys: map[string]models.Key{
+				"us-central1,custom,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "custom-4-16384",
+						"topology.kubernetes.io/region":    "us-central1",
+					},
+				},
+				"us-west3,n2standard,ondemand": &gcpKey{
+					Labels: map[string]string{
+						"node.kubernetes.io/instance-type": "n2-standard-4",
+						"topology.kubernetes.io/region":    "us-west3",
+					},
+				},
+			},
+			pvKeys: map[string]models.PVKey{},
+			expectedPrices: map[string]*GCPPricing{
+				"us-central1,custom,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.004446",
+						UsageType: "ondemand",
+					},
+				},
+				"us-central1,custom,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.03319155",
+						RAMCost:   "0.004446",
+						UsageType: "ondemand",
+					},
+				},
+				"us-west3,n2standard,ondemand": {
+					Node: &models.Node{
+						VCPUCost:  "0.037970000000000004",
+						RAMCost:   "0.005089000000000001",
+						UsageType: "ondemand",
+					},
+				},
+				"us-west3,n2standard,ondemand,gpu": {
+					Node: &models.Node{
+						VCPUCost:  "0.037970000000000004",
+						RAMCost:   "0.005089000000000001",
+						UsageType: "ondemand",
+					},
+				},
+			},
+			expectedToken: "done",
+			expectError:   false,
+		},
 		"SKU file": {
 			// NOTE: SKUs here are copied directly from GCP Billing API. Some of them
 			// are in currency IDR, which relates directly to ticket GTM-52, for which
